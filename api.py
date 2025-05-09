@@ -185,20 +185,49 @@ def add_paper_to_db(paper):
         conn.close()
 
 
-def sort_core_papers(title, papers):
-    papers.sort(key=lambda x: x['year'], reverse=True)
+def sort_core_papers(title, papers, current_id=None):
+    """
+    Sort and filter papers to avoid duplicates and the current paper.
+    Returns up to 5 papers sorted by year (most recent first).
+    """
+    if not papers or len(papers) == 0:
+        return []
+        
+    # Sort by year (most recent first)
+    papers.sort(key=lambda x: x.get('year', 0), reverse=True)
+    
     results = []
-    for i, paper in enumerate(papers):
-        if paper['title'] != title:
-            results.append({
-                "id": paper["id"],
-                "title": paper["title"],
-                "abstract": paper["abstract"],
-                "categories": paper["categories"],
-                "authors": paper["authors"],
-                "similarity": paper["similarity"]
-            })
-        if len(results) == 5:
+    seen_ids = set()
+    
+    # If current_id is provided, add it to seen_ids to avoid including it
+    if current_id:
+        seen_ids.add(current_id)
+    
+    for paper in papers:
+        # Skip if no id or title (malformed entry)
+        if not paper.get('id') or not paper.get('title'):
+            continue
+            
+        # Skip the current paper (by title or id)
+        if paper['id'] in seen_ids:
+            continue
+            
+        if title and paper.get('title') == title:
+            continue
+            
+        # Add to results and mark as seen
+        seen_ids.add(paper['id'])
+        results.append({
+            "id": paper["id"],
+            "title": paper["title"],
+            "abstract": paper.get("abstract", ""),
+            "categories": paper.get("categories", ""),
+            "authors": paper.get("authors", ""),
+            "similarity": paper.get("similarity", 0)
+        })
+        
+        # Stop after 5 papers
+        if len(results) >= 5:
             break
 
     return results
@@ -232,8 +261,17 @@ def search_papers():
             
             # Get embedding-based related papers
             print(f"DEBUG: Getting embedding-based related papers for {row[0]}")
-            hot_papers = fuzzy_search_get_all_related_papers(row[3])
-            hot_papers = sort_core_papers(row[1], hot_papers)
+            current_paper_id = row[0]
+            current_paper_title = row[1]
+            
+            # Safely get related papers with error handling
+            try:
+                hot_papers = fuzzy_search_get_all_related_papers(row[3] or "")
+                hot_papers = sort_core_papers(current_paper_title, hot_papers, current_paper_id)
+                print(f"DEBUG: Found {len(hot_papers)} hot papers for {current_paper_id}")
+            except Exception as e:
+                print(f"DEBUG: Error getting hot papers: {str(e)}")
+                hot_papers = []
 
             # Add embedding-based connections to the connections data structure
             if connections_data and "first_degree" in connections_data:
@@ -243,7 +281,7 @@ def search_papers():
                 
                 for i, hot_paper in enumerate(hot_papers):
                     # Skip if it's the same paper
-                    if hot_paper['id'] == row[0]:
+                    if hot_paper['id'] == current_paper_id:
                         continue
                         
                     # Check if this hot paper is already in the connections
@@ -270,37 +308,50 @@ def search_papers():
                             print(f"DEBUG: Added top 5 embedding-based connections for {row[0]}")
                             break
 
+            # Generate core papers with better error handling
             core_papers = []
-            current_paper_id = row[0]
-            current_paper_title = row[1]
-            
-            # First, filter out any duplicates with the current paper
-            filtered_hot_papers = [paper for paper in hot_papers if paper['id'] != current_paper_id and paper['title'] != current_paper_title]
-            
-            # Now, for each hot paper, find related papers (that aren't the current paper)
-            for paper in filtered_hot_papers:
-                paper_temp = fuzzy_search_get_all_related_papers(paper['abstract'])
-                # Filter out any related papers that match the current paper
-                paper_temp = [p for p in paper_temp if p['id'] != current_paper_id and p['title'] != current_paper_title]
-                if paper_temp:
-                    paper_temp = sort_core_papers(paper['title'], paper_temp)
-                    if paper_temp and len(paper_temp) > 0:
-                        # Make sure we're not adding the same paper more than once
-                        if not any(cp['id'] == paper_temp[0]['id'] for cp in core_papers):
-                            # Check if it's not the original paper 
-                            if paper_temp[0]['id'] != current_paper_id and paper_temp[0]['title'] != current_paper_title:
-                                core_papers.append(paper_temp[0])
-                if len(core_papers) == 5:
-                    break
+            try:
+                # First, get papers related to each hot paper
+                processed_hot_papers = []
+                # Make a copy of hot_papers to avoid modifying the original during iteration
+                for paper in hot_papers[:10]:  # Limit to first 10 hot papers for efficiency
+                    # Skip papers without abstracts
+                    if not paper.get('abstract'):
+                        continue
+                        
+                    try:
+                        paper_temp = fuzzy_search_get_all_related_papers(paper['abstract'])
+                        # Filter out duplicates and the current paper
+                        paper_temp = sort_core_papers(paper['title'], paper_temp, current_paper_id)
+                        if paper_temp and len(paper_temp) > 0:
+                            processed_hot_papers.append(paper_temp[0])
+                    except Exception as inner_e:
+                        print(f"DEBUG: Error processing hot paper {paper.get('id')}: {str(inner_e)}")
+                        continue
                 
-            # If we don't have 5 core papers yet, add more from hot papers that aren't already in core papers
-            if len(core_papers) < 5:
-                for paper in filtered_hot_papers:
-                    if not any(cp['id'] == paper['id'] for cp in core_papers):
-                        if paper['id'] != current_paper_id and paper['title'] != current_paper_title:
+                # Filter out duplicates and ensure we don't include the original paper
+                seen_ids = {current_paper_id}
+                for paper in processed_hot_papers:
+                    if paper['id'] not in seen_ids:
+                        seen_ids.add(paper['id'])
+                        core_papers.append(paper)
+                        if len(core_papers) >= 5:
+                            break
+                
+                # If we don't have 5 core papers yet, add more from hot papers
+                if len(core_papers) < 5:
+                    for paper in hot_papers:
+                        if paper['id'] not in seen_ids:
+                            seen_ids.add(paper['id'])
                             core_papers.append(paper)
-                    if len(core_papers) == 5:
-                        break
+                            if len(core_papers) >= 5:
+                                break
+                
+                print(f"DEBUG: Created {len(core_papers)} core papers for {current_paper_id}")
+            except Exception as core_e:
+                print(f"DEBUG: Error generating core papers: {str(core_e)}")
+                # Ensure we always have something for core_papers
+                core_papers = hot_papers[:5] if hot_papers else []
 
             results.append({
                 "id": row[0],
@@ -385,36 +436,8 @@ def get_paper(paper_id):
         
         paper = cursor.fetchone()
         if not paper:
-            print(f"Paper {paper_id} not found in database, fetching from ArXiv...")
-            
-            # Fetch paper from ArXiv API
-            arxiv_paper = fetch_arxiv_paper(paper_id)
-            
-            if not arxiv_paper:
-                return jsonify({"success": False, "error": f"Paper with ID {paper_id} not found in database or ArXiv"}), 404
-            
-            # Add paper to database
-            add_paper_to_db(arxiv_paper)
-            
-            # Add paper to embeddings database
-            try:
-                print(f"Adding paper {paper_id} to embeddings database...")
-                add_paper_to_embeddings_local(arxiv_paper)
-                print(f"Successfully added paper {paper_id} to embeddings")
-            except Exception as e:
-                print(f"Error adding paper to embeddings: {str(e)}")
-            
-            # Return the fetched paper
-            return jsonify({
-                "success": True,
-                "id": arxiv_paper["id"],
-                "title": arxiv_paper["title"],
-                "authors": arxiv_paper["authors"],
-                "abstract": arxiv_paper["abstract"],
-                "categories": arxiv_paper["categories"],
-                "year": arxiv_paper["year"],
-                "connected_papers": []
-            })
+            print(f"Paper {paper_id} not found in database")
+            return jsonify({"success": False, "error": f"Paper with ID {paper_id} not found in database"}), 404
             
         # Get connected papers details
         connected = []
@@ -510,6 +533,76 @@ def update_database():
         return jsonify({"status": "success"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/category-search', methods=['GET'])
+def search_by_category():
+    category = request.args.get('category')
+    print(f"DEBUG: /api/category-search received category: {category}")
+    
+    if not category:
+        print("DEBUG: No category provided")
+        return jsonify({"success": False, "error": "No category provided"}), 400
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Normalize the category format (handle both CS.LG and cs.lg formats)
+        normalized_category = category.upper()
+        if not normalized_category.startswith("CS."):
+            normalized_category = "CS." + normalized_category
+        
+        print(f"DEBUG: Searching database for category: {normalized_category}")
+        
+        # Query the database for papers with exact category match
+        # Categories are stored as comma-separated strings like "CS.CL, CS.AI"
+        cursor.execute("""
+            SELECT id, title, authors, year, month, day, categories
+            FROM papers 
+            WHERE categories LIKE ? OR categories LIKE ? OR categories LIKE ? OR categories = ?
+            ORDER BY year DESC, month DESC, day DESC
+            LIMIT 20
+        """, (
+            f"{normalized_category},%",  # Category at the start
+            f"%, {normalized_category},%",  # Category in the middle
+            f"%, {normalized_category}",  # Category at the end
+            normalized_category,  # Category as the only value
+        ))
+        
+        results = []
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            # Additional check to ensure we have exact category match
+            categories = row["categories"].split(", ") if row["categories"] else []
+            if normalized_category not in [cat.strip().upper() for cat in categories]:
+                continue
+                
+            paper = {
+                "id": row["id"],
+                "title": row["title"].strip(),
+                "authors": row["authors"],
+                "year": row["year"],
+                "categories": row["categories"]
+            }
+            results.append(paper)
+        
+        print(f"DEBUG: Found {len(results)} papers for category {normalized_category}")
+        return jsonify({
+            "success": True,
+            "category": normalized_category,
+            "results": results
+        })
+        
+    except Exception as e:
+        print(f"DEBUG: Error in /api/category-search: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+    finally:
+        conn.close()
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)

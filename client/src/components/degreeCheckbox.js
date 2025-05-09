@@ -61,7 +61,7 @@ function DegreeCheckbox({ onConnectionsLoaded = () => {} }) {
       console.log(data);
       notifyConnectionsLoaded(data);
     } catch (err) {
-        setError("Failed to fetch connections");
+        // setError("Failed to fetch connections");
         console.error("Connection error:", err);
     } finally {
         setIsLoading(false);
