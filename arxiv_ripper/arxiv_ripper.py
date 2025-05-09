@@ -53,7 +53,7 @@ def main():
         print(f"Usage: python3 arxiv_ripper.py last_updated(YYYYMMDD) \nUsing default: last {days_since_last_update} days")
         input_date = last_updated_date
 
-    end_date = datetime.now()
+    end_date = datetime(2025, 5, 1)
     
     with open('arxiv_ripper/arxiv_cs_recent.csv', mode='w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
@@ -65,6 +65,8 @@ def main():
         paper_count = 0
         papers_per_request = 100
         chunk_days = 7  # Process 1 week at a time
+
+        # print(f"\n\nProcessing date range: {input_date.date()} to {end_date.date()}\n\n")
         
         for date_range in get_date_ranges(input_date, end_date, chunk_days):
             start_dt, end_dt = date_range
