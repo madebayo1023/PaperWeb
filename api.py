@@ -191,17 +191,17 @@ def sort_core_papers(title, papers):
     for i, paper in enumerate(papers):
         if paper['title'] != title:
             results.append({
-                paper["id"],
-                paper["title"],
-                paper["abstract"],
-                paper["categories"],
-                paper["authors"],
-                paper["similarity"]
+                "id": paper["id"],
+                "title": paper["title"],
+                "abstract": paper["abstract"],
+                "categories": paper["categories"],
+                "authors": paper["authors"],
+                "similarity": paper["similarity"]
             })
-        if len(papers) == 5:
+        if len(results) == 5:
             break
 
-    return papers[:5]
+    return results
 
 @app.route('/api/search', methods=['GET'])
 def search_papers():
@@ -228,17 +228,79 @@ def search_papers():
         for row in cursor.fetchall():
             print(f"DEBUG: Found paper: {row[0]}")
             connections = flask_get_connections(row[0], 1)
-            connections = connections.get_json()
+            connections_data = connections.get_json()
+            
+            # Get embedding-based related papers
+            print(f"DEBUG: Getting embedding-based related papers for {row[0]}")
             hot_papers = fuzzy_search_get_all_related_papers(row[3])
             hot_papers = sort_core_papers(row[1], hot_papers)
 
+            # Add embedding-based connections to the connections data structure
+            if connections_data and "first_degree" in connections_data:
+                print(f"DEBUG: Adding embedding-based connections for {row[0]}")
+                # Track how many we've added
+                added_count = 0
+                
+                for i, hot_paper in enumerate(hot_papers):
+                    # Skip if it's the same paper
+                    if hot_paper['id'] == row[0]:
+                        continue
+                        
+                    # Check if this hot paper is already in the connections
+                    already_exists = False
+                    if connections_data["first_degree"] and "connections" in connections_data["first_degree"]:
+                        already_exists = any(
+                            (isinstance(conn, dict) and conn.get('id') == hot_paper['id']) or
+                            (isinstance(conn, str) and conn == hot_paper['id'])
+                            for conn in connections_data["first_degree"]["connections"]
+                        )
+                    
+                    # Add to connections if not already there
+                    if not already_exists and connections_data["first_degree"] and "connections" in connections_data["first_degree"]:
+                        print(f"DEBUG: Adding embedding connection: {hot_paper['id']}")
+                        connections_data["first_degree"]["connections"].append({
+                            "id": hot_paper['id'],
+                            "title": hot_paper['title'],
+                            "similarity": hot_paper['similarity']  # Use the actual similarity score
+                        })
+                        
+                        # Increment counter and break if we've added 5
+                        added_count += 1
+                        if added_count >= 5:
+                            print(f"DEBUG: Added top 5 embedding-based connections for {row[0]}")
+                            break
+
             core_papers = []
-            for paper in hot_papers:
+            current_paper_id = row[0]
+            current_paper_title = row[1]
+            
+            # First, filter out any duplicates with the current paper
+            filtered_hot_papers = [paper for paper in hot_papers if paper['id'] != current_paper_id and paper['title'] != current_paper_title]
+            
+            # Now, for each hot paper, find related papers (that aren't the current paper)
+            for paper in filtered_hot_papers:
                 paper_temp = fuzzy_search_get_all_related_papers(paper['abstract'])
-                paper_temp = sort_core_papers(paper['title'], paper_temp)           # unsure if this is correct
-                core_papers.append(paper_temp[0])                                   # just take the first one
+                # Filter out any related papers that match the current paper
+                paper_temp = [p for p in paper_temp if p['id'] != current_paper_id and p['title'] != current_paper_title]
+                if paper_temp:
+                    paper_temp = sort_core_papers(paper['title'], paper_temp)
+                    if paper_temp and len(paper_temp) > 0:
+                        # Make sure we're not adding the same paper more than once
+                        if not any(cp['id'] == paper_temp[0]['id'] for cp in core_papers):
+                            # Check if it's not the original paper 
+                            if paper_temp[0]['id'] != current_paper_id and paper_temp[0]['title'] != current_paper_title:
+                                core_papers.append(paper_temp[0])
                 if len(core_papers) == 5:
                     break
+                
+            # If we don't have 5 core papers yet, add more from hot papers that aren't already in core papers
+            if len(core_papers) < 5:
+                for paper in filtered_hot_papers:
+                    if not any(cp['id'] == paper['id'] for cp in core_papers):
+                        if paper['id'] != current_paper_id and paper['title'] != current_paper_title:
+                            core_papers.append(paper)
+                    if len(core_papers) == 5:
+                        break
 
             results.append({
                 "id": row[0],
@@ -251,7 +313,7 @@ def search_papers():
                 "day": row[7],
                 "hot_papers": hot_papers,
                 "core_papers": core_papers,
-                "connections": connections
+                "connections": connections_data
             })
         
         print(f"DEBUG: Returning {len(results)} results for query: {query}")

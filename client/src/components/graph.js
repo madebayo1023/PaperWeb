@@ -38,14 +38,32 @@ function Graph() {
 
             // Add first degree connections
             if (data.first_degree.connections && Array.isArray(data.first_degree.connections)) {
+                console.log("DEBUG: Processing connections:", data.first_degree.connections);
                 data.first_degree.connections.forEach(conn => {
+                    console.log("DEBUG: Processing connection:", conn);
                     // Handle both string IDs and object-based connections
                     const connId = typeof conn === 'string' ? conn : conn.id;
-                    const connTitle = typeof conn === 'string' ? `Paper ${conn}` : (conn.title || 'Unknown');
-                    const isFuzzy = typeof conn === 'object' && !!conn.similarity;
+                    
+                    // For paper titles, ensure we have a meaningful title instead of just "Paper ID"
+                    let connTitle;
+                    if (typeof conn === 'object' && conn.title) {
+                        connTitle = conn.title;
+                    } else if (typeof conn === 'string') {
+                        // We'll fetch titles later for these nodes
+                        connTitle = `Loading title for ${conn}...`;
+                    } else {
+                        connTitle = `Paper ${connId}`;
+                    }
+                    
+                    // Check for similarity property to identify embedding-based connections
+                    const hasSimilarity = typeof conn === 'object' && conn.similarity !== undefined;
+                    const isFuzzy = hasSimilarity;
+                    
+                    console.log(`DEBUG: Connection ${connId} - isFuzzy: ${isFuzzy}, similarity: ${hasSimilarity ? conn.similarity : 'N/A'}`);
                     
                     // Skip fuzzy connections if not included
                     if (!includeFuzzyConnections && isFuzzy) {
+                        console.log(`DEBUG: Skipping fuzzy connection: ${connId}`);
                         return;
                     }
                     
@@ -59,6 +77,7 @@ function Graph() {
                             isFuzzy: isFuzzy
                         });
                         nodeSet.add(connId);
+                        console.log(`DEBUG: Added node: ${connId}, isFuzzy: ${isFuzzy}`);
                     }
                     
                     links.push({
@@ -67,6 +86,7 @@ function Graph() {
                         value: isFuzzy ? conn.similarity : 1,
                         isFuzzy: isFuzzy
                     });
+                    console.log(`DEBUG: Added link: ${sourceId} -> ${connId}, isFuzzy: ${isFuzzy}`);
                 });
             }
         }
@@ -79,7 +99,18 @@ function Graph() {
                     connections.forEach(conn => {
                         // Handle both string IDs and object-based connections
                         const connId = typeof conn === 'string' ? conn : conn.id;
-                        const connTitle = typeof conn === 'string' ? `Paper ${conn}` : (conn.title || 'Unknown');
+                        
+                        // For paper titles, ensure we have a meaningful title
+                        let connTitle;
+                        if (typeof conn === 'object' && conn.title) {
+                            connTitle = conn.title;
+                        } else if (typeof conn === 'string') {
+                            // We'll fetch titles later for these nodes
+                            connTitle = `Loading title for ${conn}...`;
+                        } else {
+                            connTitle = `Paper ${connId}`;
+                        }
+                        
                         const isFuzzy = typeof conn === 'object' && !!conn.similarity;
                         
                         // Skip fuzzy connections in 2nd degree - only use citation-based for 2nd degree
@@ -133,7 +164,18 @@ function Graph() {
                     connections.forEach(conn => {
                         // Handle both string IDs and object-based connections
                         const connId = typeof conn === 'string' ? conn : conn.id;
-                        const connTitle = typeof conn === 'string' ? `Paper ${conn}` : (conn.title || 'Unknown');
+                        
+                        // For paper titles, ensure we have a meaningful title
+                        let connTitle;
+                        if (typeof conn === 'object' && conn.title) {
+                            connTitle = conn.title;
+                        } else if (typeof conn === 'string') {
+                            // We'll fetch titles later for these nodes
+                            connTitle = `Loading title for ${conn}...`;
+                        } else {
+                            connTitle = `Paper ${connId}`;
+                        }
+                        
                         const isFuzzy = typeof conn === 'object' && !!conn.similarity;
                         
                         // Skip fuzzy connections in 3rd degree - only use citation-based for 3rd degree
@@ -220,10 +262,18 @@ function Graph() {
             .selectAll("line")
             .data(data.links)
             .join("line")
-            .attr("stroke", d => d.isFuzzy ? "#9966cc" : "#999") // Purple for fuzzy connections
-            .attr("stroke-opacity", 0.6)
-            .attr("stroke-width", d => Math.sqrt(d.value) * 2)
-            .attr("stroke-dasharray", d => d.isFuzzy ? "5,5" : "none"); // Dashed lines for fuzzy connections
+            .attr("stroke", d => d.isFuzzy ? "#9900cc" : "#999") // Purple for fuzzy/embedding connections
+            .attr("stroke-opacity", d => d.isFuzzy ? 0.8 : 0.6)  // More visible opacity for embedding connections
+            .attr("stroke-width", d => {
+                // Make embedding connections thicker based on similarity
+                if (d.isFuzzy) {
+                    // Scale similarity (0-1) to width (2-6)
+                    return Math.max(2, Math.min(6, d.value * 6));
+                } else {
+                    return Math.sqrt(d.value) * 2;
+                }
+            })
+            .attr("stroke-dasharray", d => d.isFuzzy ? "5,5" : "none");
             
         // Create a group for each node
         const node = g.append("g")
@@ -246,7 +296,7 @@ function Graph() {
                 });
                 
                 // Then fetch full paper details including abstract
-                fetch(`/api/paper/${d.id}`)
+                fetch(`http://localhost:8080/api/paper/${d.id}`)
                     .then(response => {
                         if (!response.ok) {
                             console.error(`Error response from server: ${response.status}`);
@@ -272,11 +322,37 @@ function Graph() {
                     })
                     .catch(error => {
                         console.error('Error fetching paper details:', error);
-                        setSelectedPaper(prevState => ({
-                            ...prevState,
-                            abstract: "Unable to load abstract. Error: " + error.message,
-                            isLoading: false
-                        }));
+                        // Fall back to search API if paper endpoint fails
+                        fetch(`http://localhost:8080/api/search?q=${encodeURIComponent(d.id)}`)
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.success && data.results && data.results.length > 0) {
+                                    const paperData = data.results[0];
+                                    setSelectedPaper(prevState => ({
+                                        ...prevState,
+                                        name: paperData.title || prevState.name,
+                                        abstract: paperData.abstract || "No abstract available",
+                                        authors: paperData.authors,
+                                        categories: paperData.categories,
+                                        year: paperData.year,
+                                        isLoading: false
+                                    }));
+                                } else {
+                                    setSelectedPaper(prevState => ({
+                                        ...prevState,
+                                        abstract: "Unable to load abstract. Paper may not be in the database.",
+                                        isLoading: false
+                                    }));
+                                }
+                            })
+                            .catch(searchError => {
+                                console.error('Error with fallback search:', searchError);
+                                setSelectedPaper(prevState => ({
+                                    ...prevState,
+                                    abstract: "Unable to load abstract. Try searching for this paper ID directly.",
+                                    isLoading: false
+                                }));
+                            });
                     });
                 
                 // Stop event propagation to prevent zoom/pan when clicking node
@@ -453,6 +529,46 @@ function Graph() {
                 .on("start", dragstarted)
                 .on("drag", dragged)
                 .on("end", dragended);
+        }
+
+        // After the graph is created, fetch and update titles for any nodes that need them
+        const nodesToFetch = data.nodes.filter(n => n.name.startsWith("Loading title for"));
+        if (nodesToFetch.length > 0) {
+            console.log("DEBUG: Fetching titles for", nodesToFetch.length, "nodes");
+            
+            // For each node that needs a title, fetch it directly from the papers endpoint
+            nodesToFetch.forEach(nodeData => {
+                const paperId = nodeData.id;
+                fetch(`http://localhost:8080/api/paper/${encodeURIComponent(paperId)}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            console.log(`DEBUG: Got title for ${paperId}: ${data.title}`);
+                            
+                            // Update the node's name in the data
+                            nodeData.name = data.title;
+                            
+                            // Update the text in the SVG
+                            const textElement = node.filter(d => d.id === paperId).select("text");
+                            if (!textElement.empty()) {
+                                // First clear existing text
+                                textElement.selectAll("*").remove();
+                                
+                                // Truncate long names to reasonable length
+                                const maxLength = 25;
+                                const displayTitle = data.title.length > maxLength ? 
+                                    data.title.substring(0, maxLength) + '...' : 
+                                    data.title;
+                                
+                                textElement.text(displayTitle)
+                                    .call(wrap, 100);
+                            }
+                        }
+                    })
+                    .catch(error => {
+                        console.error(`Error fetching title for ${paperId}:`, error);
+                    });
+            });
         }
     };
 
